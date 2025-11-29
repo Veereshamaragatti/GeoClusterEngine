@@ -211,3 +211,148 @@ def compute_business_recommendations(cleaned_pois: pd.DataFrame,
 
 
 __all__ = ['compute_business_recommendations']
+
+
+def annotate_clusters_with_transport(top_clusters: pd.DataFrame,
+                                     cleaned_pois: pd.DataFrame,
+                                     transport_keywords: List[str] | None = None) -> pd.DataFrame:
+    """Annotate cluster centers with nearest public transport info.
+
+    Args:
+        top_clusters: DataFrame with columns ['latitude','longitude'] for cluster centers
+        cleaned_pois: POIs DataFrame including 'latitude','longitude','category'
+        transport_keywords: Optional list of keywords to match transport POIs
+
+    Returns:
+        New DataFrame with added columns:
+            - nearest_transport_type
+            - nearest_transport_name
+            - nearest_transport_distance_km
+    """
+    if top_clusters is None or len(top_clusters) == 0:
+        return top_clusters
+    if cleaned_pois is None or len(cleaned_pois) == 0:
+        df = top_clusters.copy()
+        df['nearest_transport_type'] = None
+        df['nearest_transport_name'] = None
+        df['nearest_transport_distance_km'] = None
+        return df
+
+    transport_keywords = transport_keywords or ['train', 'bus', 'station', 'parking', 'fuel', 'footway', 'footpath']
+
+    # Filter transport POIs
+    if 'category' in cleaned_pois.columns:
+        mask = pd.Series(False, index=cleaned_pois.index)
+        for kw in transport_keywords:
+            mask = mask | cleaned_pois['category'].str.contains(kw, case=False, na=False)
+        transport_pois = cleaned_pois[mask].copy()
+    else:
+        transport_pois = cleaned_pois.copy()
+
+    df = top_clusters.copy()
+    df['nearest_transport_type'] = None
+    df['nearest_transport_name'] = None
+    df['nearest_transport_distance_km'] = None
+
+    if len(transport_pois) == 0:
+        return df
+
+    # Compute nearest transport per cluster center
+    for i in range(len(df)):
+        clat = float(df.iloc[i]['latitude'])
+        clon = float(df.iloc[i]['longitude'])
+        best_d = float('inf')
+        best_type = None
+        best_name = None
+        for _, r in transport_pois.iterrows():
+            tlat = float(r['latitude'])
+            tlon = float(r['longitude'])
+            d = _haversine((clat, clon), (tlat, tlon))
+            if d < best_d:
+                best_d = d
+                best_name = str(r.get('name') or '')
+                # Infer type from category
+                cat = str(r.get('category') or '')
+                # Pick first matching keyword
+                matched = None
+                for kw in transport_keywords:
+                    if kw.lower() in cat.lower():
+                        matched = kw
+                        break
+                best_type = matched or ('transport' if cat else None)
+        df.at[df.index[i], 'nearest_transport_type'] = best_type
+        df.at[df.index[i], 'nearest_transport_name'] = best_name
+        df.at[df.index[i], 'nearest_transport_distance_km'] = round(best_d, 3) if best_d != float('inf') else None
+
+    return df
+
+
+__all__.extend(['annotate_clusters_with_transport'])
+
+def annotate_locations_with_transport(locations_df: pd.DataFrame,
+                                      cleaned_pois: pd.DataFrame,
+                                      transport_keywords: List[str] | None = None) -> pd.DataFrame:
+    """Annotate scored location candidates with nearest public transport.
+
+    Args:
+        locations_df: DataFrame containing at least ['latitude','longitude'] for recommended spots
+        cleaned_pois: Full POI set including potential transport features
+        transport_keywords: Override list of transport category substrings
+
+    Returns:
+        DataFrame with added columns:
+            nearest_transport_type, nearest_transport_name, nearest_transport_distance_km
+    """
+    if locations_df is None or len(locations_df) == 0:
+        return locations_df
+    if cleaned_pois is None or len(cleaned_pois) == 0:
+        df = locations_df.copy()
+        df['nearest_transport_type'] = None
+        df['nearest_transport_name'] = None
+        df['nearest_transport_distance_km'] = None
+        return df
+
+    transport_keywords = transport_keywords or ['train','metro','subway','bus','station','tram','parking','fuel','footway','footpath']
+    if 'category' in cleaned_pois.columns:
+        mask = pd.Series(False, index=cleaned_pois.index)
+        for kw in transport_keywords:
+            mask = mask | cleaned_pois['category'].str.contains(kw, case=False, na=False)
+        transport_pois = cleaned_pois[mask].copy()
+    else:
+        transport_pois = cleaned_pois.copy()
+
+    df = locations_df.copy()
+    df['nearest_transport_type'] = None
+    df['nearest_transport_name'] = None
+    df['nearest_transport_distance_km'] = None
+
+    if len(transport_pois) == 0:
+        return df
+
+    for i in range(len(df)):
+        clat = float(df.iloc[i]['latitude'])
+        clon = float(df.iloc[i]['longitude'])
+        best_d = float('inf')
+        best_type = None
+        best_name = None
+        for _, r in transport_pois.iterrows():
+            tlat = float(r['latitude'])
+            tlon = float(r['longitude'])
+            d = _haversine((clat, clon), (tlat, tlon))
+            if d < best_d:
+                best_d = d
+                best_name = str(r.get('name') or '')
+                cat = str(r.get('category') or '')
+                matched = None
+                for kw in transport_keywords:
+                    if kw.lower() in cat.lower():
+                        matched = kw
+                        break
+                best_type = matched or ('transport' if cat else None)
+        df.at[df.index[i], 'nearest_transport_type'] = best_type
+        df.at[df.index[i], 'nearest_transport_name'] = best_name
+        df.at[df.index[i], 'nearest_transport_distance_km'] = round(best_d, 3) if best_d != float('inf') else None
+
+    return df
+
+__all__.extend(['annotate_locations_with_transport'])

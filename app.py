@@ -25,7 +25,17 @@ from datetime import datetime
 
 from modules.fetch_data import DataFetcher
 from modules.clean_data import DataCleaner
-from modules.clustering import GeoClusterer
+try:
+    from modules.clustering import GeoClusterer, compute_factor_cluster_recommendations
+except ImportError:
+    from modules.clustering import GeoClusterer
+    # Fallback stub to avoid runtime failure if function absent
+    def compute_factor_cluster_recommendations(*args, **kwargs):
+        return {
+            'enriched_pois': None,
+            'cluster_summary': pd.DataFrame(),
+            'top_clusters': pd.DataFrame()
+        }
 from modules.visualize import MapVisualizer
 from modules.scoring import LocationScorer
 from modules.report_generator import ReportGenerator
@@ -215,6 +225,26 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     results['hotspots'] = hotspots
     results['sparse_regions'] = sparse_regions
     
+    # Factor-based cluster recommendations (KMeans on competitor/supporting/neutral densities)
+    try:
+        factor_cluster_res = compute_factor_cluster_recommendations(
+            cleaned_pois,
+            business_type=business_type,
+            competitor_radius_km=min(0.4, radius_km/10),
+            supporting_radius_km=min(0.5, radius_km/8),
+            neutral_radius_km=min(0.4, radius_km/10)
+        )
+        # Annotate top clusters with nearest transport
+        from modules.recommendations import annotate_clusters_with_transport
+        top_clusters = factor_cluster_res.get('top_clusters')
+        if top_clusters is not None and len(top_clusters) > 0:
+            top_clusters = annotate_clusters_with_transport(top_clusters, cleaned_pois)
+        results['factor_cluster_recommendations'] = top_clusters
+        results['factor_cluster_summary'] = factor_cluster_res.get('cluster_summary')
+    except Exception as e:
+        results['factor_cluster_recommendations'] = None
+        results['factor_cluster_summary'] = None
+
     # If "Best Recommendation" mode, compute top business types first
     selected_business = business_type
     best_suggestions_records = None
@@ -250,8 +280,15 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     
     scorer.save_scores()
     top_locations = scorer.get_top_locations(10)
-    st.session_state.top_locations = top_locations
-    results['top_locations'] = top_locations
+    # Annotate with nearest transport
+    try:
+        from modules.recommendations import annotate_locations_with_transport
+        top_locations_annotated = annotate_locations_with_transport(top_locations, cleaned_pois)
+    except Exception:
+        top_locations_annotated = top_locations
+    st.session_state.top_locations = top_locations_annotated
+    results['top_locations'] = top_locations_annotated
+    results['top_locations_base'] = top_locations
     results['scoring_report'] = scorer.get_analysis_report()
     # Record best-mode outputs
     results['best_mode'] = is_best_mode
@@ -277,15 +314,16 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     try:
         cluster_map = viz.create_cluster_map(clustered_pois, clusterer.cluster_stats)
         viz.save_map(cluster_map, 'cluster_map.html')
-        viz.save_static_scatter(clustered_pois, 'cluster_map.png', color_by='cluster', center_lat=center[0], center_lon=center[1])
+        # Annotated cluster scatter
+        viz.save_static_cluster_scatter(clustered_pois, 'cluster_map.png', center_lat=center[0], center_lon=center[1])
     except Exception as e:
         st.warning(f"Could not generate cluster map: {e}")
     
     try:
         heatmap = viz.create_heatmap(cleaned_pois)
         viz.save_map(heatmap, 'heatmap.html')
-        # For heatmap static, approximate with scatter (density is implicit)
-        viz.save_static_scatter(cleaned_pois, 'heatmap.png', center_lat=center[0], center_lon=center[1])
+        # Dedicated density heatmap export
+        viz.save_static_heatmap(cleaned_pois, 'heatmap.png', center_lat=center[0], center_lon=center[1])
     except Exception as e:
         st.warning(f"Could not generate heatmap: {e}")
     
@@ -605,6 +643,23 @@ def main():
                     
                     for label, data in sorted_clusters:
                         st.write(f"Cluster {label}: {data['size']} POIs")
+
+                # Nearest public transport for top factor-based clusters
+                factor_recs_for_tab2 = results.get('factor_cluster_recommendations')
+                if factor_recs_for_tab2 is not None and len(factor_recs_for_tab2) > 0:
+                    st.markdown("**Nearest Public Transport (Top Clusters)**")
+                    fr = pd.DataFrame(factor_recs_for_tab2).copy()
+                    cols = [
+                        c for c in [
+                            'rank','cluster_id','cluster_score',
+                            'nearest_transport_type','nearest_transport_name','nearest_transport_distance_km'
+                        ] if c in fr.columns
+                    ]
+                    if cols:
+                        fr_display = fr[cols].copy()
+                        if 'cluster_score' in fr_display.columns:
+                            fr_display['cluster_score'] = fr_display['cluster_score'].round(3)
+                        st.dataframe(fr_display, hide_index=True, use_container_width=True)
         
         with tab3:
             st.subheader("Density & Competition Heatmaps")
@@ -679,6 +734,16 @@ def main():
             
             with col1:
                 render_map_from_file('maps/recommendations_map.html', height=500)
+                # Moved Factor-Based Cluster Recommendations directly below the map
+                factor_recs_below_map = results.get('factor_cluster_recommendations')
+                if factor_recs_below_map is not None and len(factor_recs_below_map) > 0:
+                    st.markdown("**Factor-Based Cluster Recommendations**")
+                    fr_map_df = pd.DataFrame(factor_recs_below_map)
+                    fr_map_df_display = fr_map_df.copy()
+                    if 'cluster_score' in fr_map_df_display.columns:
+                        fr_map_df_display['cluster_score'] = fr_map_df_display['cluster_score'].round(3)
+                    st.dataframe(fr_map_df_display, hide_index=True, use_container_width=True)
+                    st.caption("Score = supporting_density_mean - 0.7*competitor_density_mean + 0.2*neutral_density_mean")
             
             with col2:
                 st.markdown("**Top 10 Locations**")
@@ -696,13 +761,17 @@ def main():
                         else:
                             st.write(f"#{rank} Score: {score:.3f}")
                         
-                        with st.expander(f"Details"):
+                        with st.expander(f"Details & Transport"):
                             st.write(f"Latitude: {row['latitude']:.5f}")
                             st.write(f"Longitude: {row['longitude']:.5f}")
                             st.write(f"Demand: {row['demand_score']:.3f}")
                             st.write(f"Competition: {row['competition_score']:.3f}")
                             st.write(f"Accessibility: {row['accessibility_score']:.3f}")
                             st.write(f"Infrastructure: {row['infrastructure_score']:.3f}")
+                            if 'nearest_transport_type' in row and pd.notna(row['nearest_transport_type']):
+                                st.write(f"Nearest Transport: {row['nearest_transport_type']} ({row.get('nearest_transport_name','')}) @ {row.get('nearest_transport_distance_km','?')} km")
+
+                # Removed factor-based cluster recommendations from this side column (now shown below map)
         
         with tab5:
             st.subheader("What-If Scenario Modeling")

@@ -474,3 +474,164 @@ def spatio_temporal_hawkes(events: list) -> dict:
         pass
     
     return {"predicted_hotspots": hotspots}
+
+
+def compute_factor_cluster_recommendations(
+    gdf: gpd.GeoDataFrame,
+    business_type: str,
+    competitor_radius_km: float = 0.3,
+    supporting_radius_km: float = 0.4,
+    neutral_radius_km: float = 0.3,
+    n_clusters: int = None,
+    random_state: int = 42
+) -> dict:
+    """Compute K-Means clusters using competitor/supporting/neutral density features.
+
+    Builds feature vectors for each POI consisting of local densities of competitor,
+    supporting, and neutral categories (within separate radii). Clusters these features
+    with K-Means, then scores each cluster for business suitability.
+
+    Cluster viability score formula (heuristic):
+        score = 1.0 * supporting_mean - 0.7 * competitor_mean + 0.2 * neutral_mean
+    Higher supporting and lower competitor densities yield better scores.
+
+    Args:
+        gdf: Cleaned POI GeoDataFrame with 'category','latitude','longitude'
+        business_type: Target business type (used to define competitor/supporting sets)
+        competitor_radius_km: Radius for competitor density
+        supporting_radius_km: Radius for supporting density
+        neutral_radius_km: Radius for neutral density
+        n_clusters: If None, a heuristic chooses cluster count
+        random_state: Random seed for K-Means
+
+    Returns:
+        dict with keys:
+            'enriched_pois': GeoDataFrame with density features + cluster_id
+            'cluster_summary': DataFrame of cluster metrics
+            'top_clusters': DataFrame of top 3 cluster recommendations
+    """
+    result = {
+        'enriched_pois': None,
+        'cluster_summary': pd.DataFrame(),
+        'top_clusters': pd.DataFrame()
+    }
+    if gdf is None or len(gdf) == 0 or 'category' not in gdf.columns:
+        return result
+
+    df = gdf.copy().reset_index(drop=True)
+    # Basic category normalization
+    df['category_norm'] = df['category'].astype(str).str.lower()
+    target = str(business_type).lower().strip()
+
+    # Supporting category map (simple heuristic list per common business types)
+    SUPPORTING_MAP = {
+        'restaurant': ['cafe','coffee_shop','bakery','supermarket','parking','bus_station','bank','atm'],
+        'cafe': ['restaurant','coffee_shop','bakery','supermarket','parking','bus_station','bank','atm'],
+        'bakery': ['cafe','coffee_shop','supermarket','restaurant','parking','bus_station'],
+        'fast_food': ['restaurant','cafe','supermarket','parking','bus_station'],
+        'shop': ['supermarket','parking','bus_station','bank','atm'],
+        'supermarket': ['shop','parking','bus_station','atm','bank'],
+        'pharmacy': ['hospital','clinic','supermarket','parking','bus_station'],
+        'bank': ['atm','shop','supermarket','parking'],
+        'gym': ['parking','bus_station','shop','supermarket','cafe'],
+        'hotel': ['restaurant','cafe','parking','bus_station','atm','bank']
+    }
+    supporting_set = set(SUPPORTING_MAP.get(target, []))
+    competitor_set = {target}
+
+    # Classify categories
+    def classify(cat: str) -> str:
+        if cat in competitor_set:
+            return 'competitor'
+        if cat in supporting_set:
+            return 'supporting'
+        return 'neutral'
+
+    df['factor_class'] = df['category_norm'].apply(classify)
+
+    # Coordinate array (lat, lon)
+    coords = df[['latitude','longitude']].to_numpy()
+    if len(coords) == 0:
+        return result
+
+    # Build KDTree for approximate neighbor search (degree approximation)
+    # 1 degree lat ~ 111 km; adjust lon by cos(mean_lat)
+    mean_lat = np.mean(coords[:,0]) if len(coords) else 0.0
+    lat_km_factor = 111.0
+    lon_km_factor = 111.321 * np.cos(np.radians(mean_lat))
+
+    # Convert radii km to degree radius (use min of lat/lon scaling for conservative search)
+    def km_to_deg(km: float) -> float:
+        return km / lat_km_factor
+
+    comp_deg = km_to_deg(competitor_radius_km)
+    supp_deg = km_to_deg(supporting_radius_km)
+    neut_deg = km_to_deg(neutral_radius_km)
+
+    from sklearn.neighbors import KDTree
+    tree = KDTree(coords, metric='euclidean')  # degree-space approximation
+
+    # Pre-sets for vectorized lookups
+    categories = df['factor_class'].to_numpy()
+
+    comp_counts = np.zeros(len(df), dtype=int)
+    supp_counts = np.zeros(len(df), dtype=int)
+    neut_counts = np.zeros(len(df), dtype=int)
+
+    # Query neighbors and count category types per point
+    comp_inds = tree.query_radius(coords, r=comp_deg)
+    supp_inds = tree.query_radius(coords, r=supp_deg)
+    neut_inds = tree.query_radius(coords, r=neut_deg)
+
+    for i, inds in enumerate(comp_inds):
+        if len(inds):
+            comp_counts[i] = np.sum(categories[inds] == 'competitor') - (categories[i] == 'competitor')
+    for i, inds in enumerate(supp_inds):
+        if len(inds):
+            supp_counts[i] = np.sum(categories[inds] == 'supporting') - (categories[i] == 'supporting')
+    for i, inds in enumerate(neut_inds):
+        if len(inds):
+            neut_counts[i] = np.sum(categories[inds] == 'neutral') - (categories[i] == 'neutral')
+
+    df['competitor_density'] = comp_counts.astype(float)
+    df['supporting_density'] = supp_counts.astype(float)
+    df['neutral_density'] = neut_counts.astype(float)
+
+    # Feature matrix for clustering
+    feature_cols = ['competitor_density','supporting_density','neutral_density']
+    X = df[feature_cols].to_numpy()
+
+    # Heuristic clusters if not provided
+    if n_clusters is None:
+        n_clusters = int(np.clip(np.sqrt(len(df)/50)+3, 4, 12))
+
+    # Scale features
+    scaler = StandardScaler()
+    Xs = scaler.fit_transform(X)
+    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+    df['factor_cluster'] = km.fit_predict(Xs)
+
+    # Aggregate cluster metrics
+    agg = df.groupby('factor_cluster')[feature_cols].mean().rename(columns=lambda c: c+'_mean')
+    sizes = df.groupby('factor_cluster').size().rename('size')
+
+    cluster_centers = df.groupby('factor_cluster')[['latitude','longitude']].mean()
+    summary = pd.concat([agg, sizes, cluster_centers], axis=1).reset_index().rename(columns={'factor_cluster':'cluster_id'})
+
+    # Score clusters
+    summary['cluster_score'] = (
+        1.0 * summary['supporting_density_mean']
+        - 0.7 * summary['competitor_density_mean']
+        + 0.2 * summary['neutral_density_mean']
+    )
+
+    # Rank clusters
+    summary = summary.sort_values('cluster_score', ascending=False).reset_index(drop=True)
+    summary['rank'] = summary.index + 1
+
+    top_clusters = summary.head(3)[['rank','cluster_id','latitude','longitude','supporting_density_mean','competitor_density_mean','neutral_density_mean','cluster_score']]
+
+    result['enriched_pois'] = df
+    result['cluster_summary'] = summary
+    result['top_clusters'] = top_clusters
+    return result

@@ -591,6 +591,100 @@ class MapVisualizer:
         except Exception as e:
             print(f"Failed to save static scatter: {e}")
             return ""
+
+    def save_static_cluster_scatter(self, gdf: gpd.GeoDataFrame, filename: str,
+                                    center_lat: float = None, center_lon: float = None) -> str:
+        """Create a cluster annotated scatter plot.
+
+        Adds cluster labels (id + count) at cluster centroid.
+
+        Args:
+            gdf: GeoDataFrame with 'cluster' column
+            filename: Output PNG name
+            center_lat/center_lon: Optional center marker
+        Returns:
+            File path or empty string
+        """
+        if 'cluster' not in gdf.columns or len(gdf) == 0:
+            return ""
+        import matplotlib.pyplot as plt
+        path = os.path.join('maps', filename)
+        try:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            clusters = gdf['cluster'].fillna(-1).astype(int)
+            unique = sorted(clusters.unique())
+            cmap = plt.get_cmap('tab20')
+            for i, cid in enumerate(unique):
+                subset = gdf[clusters == cid]
+                ax.scatter(subset['longitude'], subset['latitude'], s=14,
+                           color=cmap(i % 20), alpha=0.65, label=f"C{cid} ({len(subset)})")
+                # Annotate centroid
+                cx = subset['longitude'].mean()
+                cy = subset['latitude'].mean()
+                ax.text(cx, cy, f"C{cid}", fontsize=8, ha='center', va='center',
+                        color='black', bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.6))
+            if center_lat is not None and center_lon is not None:
+                ax.scatter([center_lon], [center_lat], c='red', s=70, marker='x')
+            ax.set_xlabel('Longitude')
+            ax.set_ylabel('Latitude')
+            ax.set_title('Cluster Distribution')
+            ax.legend(loc='upper right', fontsize='x-small', frameon=False)
+            plt.tight_layout()
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            return path
+        except Exception as e:
+            print(f"Failed to save cluster scatter: {e}")
+            return ""
+
+    def save_static_heatmap(self, gdf: gpd.GeoDataFrame, filename: str,
+                             center_lat: float = None, center_lon: float = None,
+                             bins: int = 60, smooth: bool = True) -> str:
+        """Create a density heatmap PNG using 2D histogram (optionally smoothed).
+
+        Args:
+            gdf: GeoDataFrame with latitude/longitude
+            filename: Output PNG name
+            center_lat/center_lon: Optional center marker
+            bins: Resolution of histogram grid
+            smooth: Apply Gaussian smoothing if possible
+        Returns:
+            File path or empty string
+        """
+        if 'latitude' not in gdf.columns or 'longitude' not in gdf.columns or len(gdf) == 0:
+            return ""
+        import matplotlib.pyplot as plt
+        path = os.path.join('maps', filename)
+        try:
+            lats = gdf['latitude'].values
+            lons = gdf['longitude'].values
+            # Compute histogram
+            H, xedges, yedges = np.histogram2d(lons, lats, bins=bins)
+            # Optional smoothing
+            if smooth:
+                try:
+                    from scipy.ndimage import gaussian_filter
+                    H = gaussian_filter(H, sigma=1.2)
+                except Exception:
+                    pass
+            # Plot
+            fig, ax = plt.subplots(figsize=(8, 6))
+            im = ax.imshow(H.T, origin='lower', cmap='YlOrRd',
+                           extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+                           aspect='auto')
+            plt.colorbar(im, ax=ax, label='Density')
+            if center_lat is not None and center_lon is not None:
+                ax.scatter([center_lon], [center_lat], c='blue', s=70, marker='x')
+            ax.set_xlabel('Longitude')
+            ax.set_ylabel('Latitude')
+            ax.set_title('POI Density Heatmap')
+            plt.tight_layout()
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            return path
+        except Exception as e:
+            print(f"Failed to save heatmap: {e}")
+            return ""
     
     def get_map_html(self, m: folium.Map) -> str:
         """
