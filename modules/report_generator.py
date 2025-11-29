@@ -63,14 +63,20 @@ class ReportGenerator:
             spaceAfter=8,
             textColor=colors.HexColor('#34495e')
         ))
-        
-        self.styles.add(ParagraphStyle(
-            name='BodyText',
-            parent=self.styles['Normal'],
-            fontSize=11,
-            spaceAfter=12,
-            alignment=TA_JUSTIFY
-        ))
+        # Safely configure BodyText without redefining existing style
+        if 'BodyText' in getattr(self.styles, 'byName', {}):
+            body = self.styles['BodyText']
+            body.fontSize = 11
+            body.spaceAfter = 12
+            body.alignment = TA_JUSTIFY
+        else:
+            self.styles.add(ParagraphStyle(
+                name='BodyText',
+                parent=self.styles['Normal'],
+                fontSize=11,
+                spaceAfter=12,
+                alignment=TA_JUSTIFY
+            ))
         
         self.styles.add(ParagraphStyle(
             name='Highlight',
