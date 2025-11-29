@@ -4,6 +4,8 @@ Fetches POI data from OpenStreetMap using OSMnx and Overpass API
 """
 
 import os
+import time
+import hashlib
 import json
 import pandas as pd
 import geopandas as gpd
@@ -48,7 +50,7 @@ class DataFetcher:
         'bus_stops': {'highway': 'bus_stop'}
     }
     
-    def __init__(self, city_name: str, radius_km: float = 5.0):
+    def __init__(self, city_name: str, radius_km: float = 5.0, fast_mode: bool = True):
         """
         Initialize the DataFetcher with city and search parameters.
         
@@ -61,6 +63,16 @@ class DataFetcher:
         self.radius_m = radius_km * 1000
         self.center_point = None
         self.all_pois = None
+        self.fast_mode = fast_mode
+        # Configure osmnx cache to speed up repeated queries
+        try:
+            ox.settings.use_cache = True
+            cache_dir = os.path.join('cache', 'osmnx')
+            os.makedirs(cache_dir, exist_ok=True)
+            ox.settings.cache_folder = cache_dir
+            ox.settings.log_console = False
+        except Exception:
+            pass
         
     def get_city_center(self) -> tuple:
         """
@@ -128,20 +140,163 @@ class DataFetcher:
         if categories is None:
             categories = list(self.POI_CATEGORIES.keys())
         
+        # Fast path: combine tags into a single Overpass request where possible
+        try:
+            combined = self._build_combined_tags(categories)
+        except Exception:
+            combined = None
+
+        if combined is not None and self.fast_mode:
+            gdf = self._fetch_pois_bulk(combined, categories)
+            if len(gdf) > 0:
+                self.all_pois = gdf
+                return gdf
+
+        # Fallback to per-category sequential fetch
         all_gdfs = []
-        
         for category in categories:
             print(f"Fetching {category}...")
             gdf = self.fetch_pois_by_category(category)
             if len(gdf) > 0:
                 all_gdfs.append(gdf)
                 print(f"  Found {len(gdf)} {category} POIs")
-        
         if all_gdfs:
             self.all_pois = gpd.GeoDataFrame(pd.concat(all_gdfs, ignore_index=True))
             return self.all_pois
-        
         return gpd.GeoDataFrame()
+
+    def _build_combined_tags(self, categories: list) -> dict:
+        """Build a combined tags dict to query multiple categories at once.
+        Reduces the number of Overpass requests significantly.
+        """
+        if self.center_point is None:
+            self.get_city_center()
+        if self.center_point is None:
+            return None
+
+        amenity_vals = []
+        shop_vals = []
+        leisure_vals = []
+        tourism_vals = []
+        highway_vals = []
+
+        for cat in categories:
+            spec = self.POI_CATEGORIES.get(cat, {'amenity': cat})
+            for key, val in spec.items():
+                if key == 'amenity':
+                    if isinstance(val, list):
+                        amenity_vals.extend(val)
+                    elif val is True:
+                        # Ignore amenity True (too broad)
+                        pass
+                    else:
+                        amenity_vals.append(val)
+                elif key == 'shop':
+                    if val is True:
+                        # Broad 'shop' fetch is expensive; narrow in fast mode
+                        if self.fast_mode:
+                            shop_vals.extend(['supermarket', 'convenience', 'mall', 'bakery'])
+                        else:
+                            # If not fast_mode, still avoid True to prevent huge responses
+                            shop_vals.extend(['supermarket', 'convenience', 'mall', 'bakery'])
+                    elif isinstance(val, list):
+                        shop_vals.extend(val)
+                    else:
+                        shop_vals.append(val)
+                elif key == 'leisure':
+                    if isinstance(val, list):
+                        leisure_vals.extend(val)
+                    else:
+                        leisure_vals.append(val)
+                elif key == 'tourism':
+                    if isinstance(val, list):
+                        tourism_vals.extend(val)
+                    else:
+                        tourism_vals.append(val)
+                elif key == 'highway':
+                    if isinstance(val, list):
+                        highway_vals.extend(val)
+                    else:
+                        highway_vals.append(val)
+
+        tags = {}
+        if amenity_vals:
+            tags['amenity'] = sorted(list(set(amenity_vals)))
+        if shop_vals:
+            tags['shop'] = sorted(list(set(shop_vals)))
+        if leisure_vals:
+            tags['leisure'] = sorted(list(set(leisure_vals)))
+        if tourism_vals:
+            tags['tourism'] = sorted(list(set(tourism_vals)))
+        if highway_vals:
+            tags['highway'] = sorted(list(set(highway_vals)))
+
+        return tags if tags else None
+
+    def _bulk_cache_key(self, combined_tags: dict) -> str:
+        sig = json.dumps({k: combined_tags[k] for k in sorted(combined_tags)}, sort_keys=True)
+        cp = self.center_point or (0, 0)
+        key = f"{cp[0]:.5f}_{cp[1]:.5f}_{int(self.radius_m)}_{sig}"
+        return hashlib.md5(key.encode('utf-8')).hexdigest()
+
+    def _fetch_pois_bulk(self, combined_tags: dict, categories: list) -> gpd.GeoDataFrame:
+        """Single Overpass request for many categories with simple caching."""
+        if self.center_point is None:
+            self.get_city_center()
+        if self.center_point is None:
+            return gpd.GeoDataFrame()
+
+        cache_dir = os.path.join('cache', 'bulk')
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_key = self._bulk_cache_key(combined_tags)
+        cache_path = os.path.join(cache_dir, f"pois_{cache_key}.parquet")
+
+        # Try cache
+        try:
+            if os.path.exists(cache_path):
+                df = gpd.read_parquet(cache_path)
+                return df
+        except Exception:
+            pass
+
+        try:
+            gdf = ox.features_from_point(self.center_point, tags=combined_tags, dist=self.radius_m)
+            if len(gdf) == 0:
+                return gpd.GeoDataFrame()
+
+            # Derive our 'category' values from OSM tags
+            def derive_category(row):
+                # Priority by specificity
+                val = str(row.get('amenity', '')).lower()
+                if val in ['restaurant', 'cafe', 'fast_food', 'pharmacy', 'bank', 'fuel', 'parking', 'bus_station']:
+                    return val
+                sval = str(row.get('shop', '')).lower()
+                if sval in ['supermarket', 'convenience', 'mall', 'bakery']:
+                    return sval
+                tval = str(row.get('tourism', '')).lower()
+                if tval == 'hotel':
+                    return 'hotel'
+                lval = str(row.get('leisure', '')).lower()
+                if lval == 'fitness_centre':
+                    return 'gym'
+                return 'other'
+
+            gdf = gdf.copy()
+            gdf['category'] = gdf.apply(derive_category, axis=1)
+            gdf['source'] = 'osm'
+            if 'name' not in gdf.columns:
+                gdf['name'] = 'unknown'
+
+            # Save cache
+            try:
+                gdf.to_parquet(cache_path, index=False)
+            except Exception:
+                pass
+
+            return gdf
+        except Exception as e:
+            print(f"Bulk fetch failed, falling back. Reason: {e}")
+            return gpd.GeoDataFrame()
     
     def fetch_competitors(self, business_type: str) -> gpd.GeoDataFrame:
         """
