@@ -28,6 +28,7 @@ from modules.clustering import GeoClusterer
 from modules.visualize import MapVisualizer
 from modules.scoring import LocationScorer
 from modules.report_generator import ReportGenerator
+from modules.business_suggestion import BusinessSuggester
 
 
 os.makedirs('data', exist_ok=True)
@@ -445,13 +446,14 @@ def main():
         
         st.divider()
         
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
             "📍 POI Map",
             "🔵 Clusters",
             "🔥 Heatmaps",
             "⭐ Recommendations",
             "🎯 Scenario Modeling",
             "🌍 Multi-City",
+            "📍 Location Analysis",
             "📊 Reports"
         ])
         
@@ -697,6 +699,94 @@ def main():
                     st.info("Add cities above to compare locations across multiple cities.")
         
         with tab7:
+            st.subheader("What Businesses Can I Open Here?")
+            st.caption("Analyze a specific location and discover the best business opportunities")
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.markdown("### Enter Location Coordinates")
+                
+                loc_lat = st.number_input(
+                    "Latitude",
+                    value=st.session_state.center[0] if st.session_state.center else 0.0,
+                    format="%.5f",
+                    help="Latitude of the location to analyze"
+                )
+                
+                loc_lon = st.number_input(
+                    "Longitude",
+                    value=st.session_state.center[1] if st.session_state.center else 0.0,
+                    format="%.5f",
+                    help="Longitude of the location to analyze"
+                )
+                
+                loc_radius = st.slider(
+                    "Analysis Radius (km)",
+                    min_value=0.5,
+                    max_value=5.0,
+                    value=1.0,
+                    step=0.1,
+                    help="Radius around the location to analyze"
+                )
+                
+                if st.button("🔍 Analyze Location", use_container_width=True, type="primary"):
+                    if st.session_state.cleaned_pois is not None:
+                        with st.spinner("Analyzing location..."):
+                            try:
+                                suggester = BusinessSuggester(
+                                    st.session_state.cleaned_pois,
+                                    st.session_state.center[0],
+                                    st.session_state.center[1]
+                                )
+                                
+                                suggestions = suggester.suggest_businesses_at_location(
+                                    loc_lat, loc_lon, loc_radius
+                                )
+                                
+                                st.session_state['location_suggestions'] = suggestions
+                                st.session_state['location_summary'] = suggester.get_recommendation_summary(suggestions)
+                                st.success("Analysis complete!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error analyzing location: {e}")
+                    else:
+                        st.warning("Please run an analysis first to get POI data")
+            
+            with col2:
+                st.markdown("### Business Recommendations")
+                
+                if 'location_suggestions' in st.session_state:
+                    suggestions = st.session_state['location_suggestions']
+                    
+                    if len(suggestions) > 0:
+                        # Show top 3 visually
+                        for idx, row in suggestions.head(3).iterrows():
+                            medal = "🥇" if idx == 0 else "🥈" if idx == 1 else "🥉"
+                            with st.container():
+                                st.markdown(f"""
+                                <div style="background-color: #e8f4f8; padding: 1rem; border-radius: 0.5rem; margin-bottom: 0.5rem; border-left: 4px solid #1f77b4;">
+                                    <b>{medal} {row['Business Type']}</b><br/>
+                                    Viability Score: <b>{row['Viability Score']:.3f}</b>/1.0<br/>
+                                    <small>Demand: {row['Demand']:.2f} | Competition: {row['Competition']:.2f} | Access: {row['Accessibility']:.2f}</small>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        
+                        st.divider()
+                        
+                        st.markdown("### All Business Options")
+                        st.dataframe(
+                            suggestions.drop(columns=['Business Type'], errors='ignore') if 'Business Type' in suggestions.columns else suggestions,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        st.markdown("### Summary")
+                        st.info(st.session_state.get('location_summary', ''))
+                else:
+                    st.info("Enter coordinates and click 'Analyze Location' to see business recommendations.")
+        
+        with tab8:
             st.subheader("Data Files & Reports")
             
             col1, col2 = st.columns(2)

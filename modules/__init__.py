@@ -9,6 +9,7 @@ from modules.clustering import GeoClusterer
 from modules.visualize import MapVisualizer
 from modules.scoring import LocationScorer
 from modules.report_generator import ReportGenerator
+from modules.business_suggestion import BusinessSuggester
 
 __all__ = [
     'DataFetcher',
@@ -16,5 +17,6 @@ __all__ = [
     'GeoClusterer',
     'MapVisualizer',
     'LocationScorer',
-    'ReportGenerator'
+    'ReportGenerator',
+    'BusinessSuggester'
 ]
