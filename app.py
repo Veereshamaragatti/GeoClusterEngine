@@ -17,6 +17,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import folium
+import altair as alt
 from streamlit_folium import st_folium, folium_static
 import time
 import json
@@ -855,6 +856,27 @@ def main():
                     
                     comparison_df = pd.DataFrame(comparison_rows)
                     st.dataframe(comparison_df, hide_index=True, use_container_width=True)
+
+                    # Multi-City Comparison Chart
+                    numeric_df = comparison_df.copy()
+                    # Convert Top Score and Radius to numeric for plotting
+                    numeric_df['Top Score'] = numeric_df['Top Score'].astype(float)
+                    numeric_df['Radius'] = numeric_df['Radius'].str.replace(' km','', regex=False).astype(float)
+                    melted = numeric_df.melt('City', var_name='Metric', value_name='Value')
+                    # Exclude radius if not desired in main comparison (optional)
+                    focus_metrics = melted[melted['Metric'].isin(['POIs','Clusters','Competitors','Top Score'])]
+                    chart = (
+                        alt.Chart(focus_metrics)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X('City:N', title='City'),
+                            y=alt.Y('Value:Q', title='Value'),
+                            color=alt.Color('Metric:N', title='Metric'),
+                            tooltip=['City','Metric','Value']
+                        )
+                        .properties(title='Multi-City Metric Comparison', height=360)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
                     
                     st.markdown("### Best City Recommendation")
                     if comparison_rows:
