@@ -114,19 +114,37 @@ def initialize_session_state():
 
 
 def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
-                          weights: dict, progress_bar) -> dict:
+                          weights: dict, progress_bar, center_coords=None) -> dict:
     """
     Run the complete analysis pipeline with progress updates.
+    
+    Args:
+        city: Name of city or location description
+        business_type: Type of business to analyze
+        radius_km: Search radius in kilometers
+        weights: Dictionary of scoring weights
+        progress_bar: Streamlit progress bar object
+        center_coords: Optional tuple of (latitude, longitude) to use instead of geocoding city name
     """
     results = {}
     
-    progress_bar.progress(10, "Fetching city location...")
-    fetcher = DataFetcher(city, radius_km)
-    center = fetcher.get_city_center()
+    # Create fetcher instance
+    fetcher = DataFetcher("", radius_km)
     
-    if center is None:
-        st.error(f"Could not find city: {city}. Please check the spelling.")
-        return None
+    if center_coords is not None:
+        # Use provided coordinates directly
+        progress_bar.progress(10, "Using provided coordinates...")
+        center = center_coords
+        fetcher.center_point = center
+    else:
+        # Geocode city name
+        progress_bar.progress(10, "Fetching city location...")
+        fetcher = DataFetcher(city, radius_km)
+        center = fetcher.get_city_center()
+        
+        if center is None:
+            st.error(f"Could not find city: {city}. Please check the spelling.")
+            return None
     
     results['center'] = center
     results['city'] = city
@@ -367,11 +385,39 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        city = st.text_input(
-            "City Name",
-            value="Bangalore",
-            help="Enter the city name for analysis"
+        # Location input method selection
+        location_method = st.radio(
+            "How would you like to specify the location?",
+            options=["City Name", "Coordinates (Lat/Lon)"],
+            horizontal=True,
+            help="Choose between entering a city name or geographic coordinates"
         )
+        
+        if location_method == "City Name":
+            city = st.text_input(
+                "City Name",
+                value="Bangalore",
+                help="Enter the city name for analysis"
+            )
+            center_coords = None
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                latitude = st.number_input(
+                    "Latitude",
+                    value=12.9716,
+                    format="%.6f",
+                    help="Enter latitude coordinate (e.g., 12.9716 for Bangalore)"
+                )
+            with col2:
+                longitude = st.number_input(
+                    "Longitude",
+                    value=77.5946,
+                    format="%.6f",
+                    help="Enter longitude coordinate (e.g., 77.5946 for Bangalore)"
+                )
+            city = f"Location ({latitude}, {longitude})"
+            center_coords = (latitude, longitude)
         
         business_options = [
             'cafe', 'restaurant', 'shop', 'supermarket', 'pharmacy',
@@ -435,7 +481,8 @@ def main():
             progress_bar = st.progress(0, "Initializing...")
             
             results = run_analysis_pipeline(
-                city, business_type, radius_km, weights, progress_bar
+                city, business_type, radius_km, weights, progress_bar, 
+                center_coords=center_coords
             )
             
             if results:
