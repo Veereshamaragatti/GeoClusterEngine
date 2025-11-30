@@ -91,6 +91,7 @@ st.markdown("""
         border-radius: 0.5rem;
         margin-bottom: 0.5rem;
         border-left: 4px solid #1f77b4;
+        color: #d62728; /* make text inside white box red */
     }
 </style>
 """, unsafe_allow_html=True)
@@ -180,14 +181,25 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     if is_best_mode:
         # Use profiles from recommendations module (no synthetic expansion)
         from modules.recommendations import compute_business_recommendations
-        candidate_types = list(BUSINESS_PROFILES.keys()) if 'BUSINESS_PROFILES' in globals() else [
-            'cafe','restaurant','bakery','fast_food','shop','supermarket','pharmacy','bank','gym','hotel'
-        ]
+        try:
+            from modules.recommendations import BUSINESS_PROFILES
+            candidate_types = list(BUSINESS_PROFILES.keys())
+        except Exception:
+            candidate_types = [
+                'cafe','restaurant','bakery','fast_food','shop','supermarket','pharmacy','bank','gym','hotel'
+            ]
         categories = list(set(base_categories + candidate_types))
     else:
         categories = list(set(base_categories + [business_type]))
     
     all_pois = fetcher.fetch_all_pois(categories)
+    # Terminal logging of raw POI counts by category (top 12)
+    try:
+        cat_counts = all_pois['category'].value_counts().head(12)
+        print("[POI FETCH SUMMARY] Total raw POIs:", len(all_pois))
+        print(cat_counts.to_string())
+    except Exception:
+        pass
     
     if len(all_pois) == 0:
         st.error("No POIs found in the specified area. Try a larger radius or different city.")
@@ -199,6 +211,13 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     progress_bar.progress(40, "Cleaning and preparing data...")
     cleaner = DataCleaner()
     cleaned_pois = cleaner.clean_geodataframe(all_pois)
+    try:
+        print(f"[POI CLEAN SUMMARY] Cleaned POIs: {len(cleaned_pois)} (removed {len(all_pois)-len(cleaned_pois)} duplicates/noise)")
+        if 'category_group' in cleaned_pois.columns:
+            grp_counts = cleaned_pois['category_group'].value_counts().head(10)
+            print("[Top Category Groups]\n" + grp_counts.to_string())
+    except Exception:
+        pass
     
     fetcher.save_to_csv(cleaned_pois, 'cleaned_data.csv')
     st.session_state.cleaned_pois = cleaned_pois
@@ -213,6 +232,10 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     min_samples = max(3, int(len(coords) / 100))
     
     labels = clusterer.dbscan_clustering(coords, eps_km=eps_km, min_samples=min_samples)
+    try:
+        print(f"[CLUSTERING] Found {clusterer.cluster_stats.get('n_clusters',0)} clusters; Noise points: {clusterer.cluster_stats.get('n_noise',0)}")
+    except Exception:
+        pass
     hotspots = clusterer.detect_hotspots(coords)
     sparse_regions = clusterer.detect_sparse_regions(coords, center[0], center[1])
     
@@ -280,6 +303,13 @@ def run_analysis_pipeline(city: str, business_type: str, radius_km: float,
     
     scorer.save_scores()
     top_locations = scorer.get_top_locations(10)
+    try:
+        if top_locations is not None and len(top_locations) > 0:
+            print("[TOP LOCATIONS] Top 3 scores:")
+            for _, r in top_locations.head(3).iterrows():
+                print(f"  Rank {int(r['rank'])}: Score {r['final_score']:.3f} @ ({r['latitude']:.5f},{r['longitude']:.5f})")
+    except Exception:
+        pass
     # Annotate with nearest transport
     try:
         from modules.recommendations import annotate_locations_with_transport
@@ -542,12 +572,12 @@ def main():
         
         st.divider()
         
-        run_analysis = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
+        run_analysis = st.button("🚀 Run Analysis", type="primary", width='stretch')
         
         if st.session_state.analysis_complete:
             st.success("Analysis Complete!")
             
-            if st.button("🔄 Re-score with New Weights", use_container_width=True):
+            if st.button("🔄 Re-score with New Weights", width='stretch'):
                 with st.spinner("Re-scoring..."):
                     new_top = run_quick_rescore(weights)
                     if new_top is not None:
@@ -659,7 +689,7 @@ def main():
                         fr_display = fr[cols].copy()
                         if 'cluster_score' in fr_display.columns:
                             fr_display['cluster_score'] = fr_display['cluster_score'].round(3)
-                        st.dataframe(fr_display, hide_index=True, use_container_width=True)
+                        st.dataframe(fr_display, hide_index=True, width='stretch')
         
         with tab3:
             st.subheader("Density & Competition Heatmaps")
@@ -706,7 +736,7 @@ def main():
             if results.get('best_mode') and results.get('best_suggestions'):
                 st.markdown("**Top Business Types for This Area**")
                 best_df = pd.DataFrame(results['best_suggestions'])
-                st.dataframe(best_df, hide_index=True, use_container_width=True)
+                st.dataframe(best_df, hide_index=True, width='stretch')
 
                 # Allow quick re-score by choosing among top-3 types
                 suggestion_names = [r.get('Business Type', '') for r in results['best_suggestions']]
@@ -719,7 +749,7 @@ def main():
                 if chosen:
                     col_rescore_a, col_rescore_b = st.columns([1,1])
                     with col_rescore_a:
-                        if st.button("🔄 Re-score with selected type", use_container_width=True, key="rescore_best_pick"):
+                        if st.button("🔄 Re-score with selected type", width='stretch', key="rescore_best_pick"):
                             # Update current selection and re-score quickly
                             st.session_state.results['business_type'] = chosen.lower()
                             st.session_state.current_business = chosen.lower()
@@ -742,8 +772,7 @@ def main():
                     fr_map_df_display = fr_map_df.copy()
                     if 'cluster_score' in fr_map_df_display.columns:
                         fr_map_df_display['cluster_score'] = fr_map_df_display['cluster_score'].round(3)
-                    st.dataframe(fr_map_df_display, hide_index=True, use_container_width=True)
-                    st.caption("Score = supporting_density_mean - 0.7*competitor_density_mean + 0.2*neutral_density_mean")
+                    st.dataframe(fr_map_df_display, hide_index=True, width='stretch')
             
             with col2:
                 st.markdown("**Top 10 Locations**")
@@ -800,14 +829,14 @@ def main():
                 
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    if st.button("🔍 Preview Scenario", use_container_width=True):
+                    if st.button("🔍 Preview Scenario", width='stretch'):
                         with st.spinner("Calculating..."):
                             preview_results = run_quick_rescore(scenario_weights)
                             if preview_results is not None:
                                 st.session_state['preview_results'] = preview_results
                 
                 with col_b:
-                    if st.button("💾 Save Scenario", use_container_width=True):
+                    if st.button("💾 Save Scenario", width='stretch'):
                         preview = st.session_state.get('preview_results')
                         if preview is not None:
                             save_scenario(scenario_name, scenario_weights, preview)
@@ -872,14 +901,27 @@ def main():
                 
                 compare_city = st.text_input("City to Add", value="Mumbai", key="compare_city")
                 compare_radius = st.slider("Radius (km)", 1.0, 20.0, 5.0, 0.5, key="compare_radius")
+                # Use the main business options for a consistent dropdown
+                _default_biz = str(results.get('business_type', 'cafe')).lower().replace('_',' ').strip()
+                try:
+                    _default_idx = next(i for i, opt in enumerate(business_options)
+                                         if opt.lower().replace('_',' ').strip() == _default_biz)
+                except StopIteration:
+                    _default_idx = 0
+                compare_business = st.selectbox(
+                    "Business Type for this City",
+                    options=business_options,
+                    index=_default_idx,
+                    key="compare_business"
+                )
                 
-                if st.button("➕ Add City to Comparison", use_container_width=True):
+                if st.button("➕ Add City to Comparison", width='stretch'):
                     if compare_city:
                         with st.spinner(f"Analyzing {compare_city}..."):
                             progress = st.progress(0)
                             compare_results = run_analysis_pipeline(
-                                compare_city, 
-                                results.get('business_type', 'cafe'),
+                                compare_city,
+                                compare_business,
                                 compare_radius,
                                 st.session_state.current_weights or weights,
                                 progress
@@ -888,7 +930,8 @@ def main():
                                 st.session_state.multi_city_results[compare_city] = {
                                     'results': compare_results,
                                     'top_locations': compare_results.get('top_locations'),
-                                    'radius': compare_radius
+                                    'radius': compare_radius,
+                                    'business': compare_business
                                 }
                                 st.success(f"Added {compare_city} to comparison!")
                                 st.rerun()
@@ -898,7 +941,8 @@ def main():
                     st.session_state.multi_city_results[current_city] = {
                         'results': results,
                         'top_locations': st.session_state.top_locations,
-                        'radius': results.get('radius_km', 5.0)
+                        'radius': results.get('radius_km', 5.0),
+                        'business': results.get('business_type', 'cafe')
                     }
             
             with col2:
@@ -916,6 +960,7 @@ def main():
                         
                         comparison_rows.append({
                             'City': city_name,
+                            'Business': data.get('business', city_results.get('business_type', '')),
                             'POIs': city_results.get('cleaned_poi_count', 0),
                             'Clusters': city_results.get('cluster_stats', {}).get('n_clusters', 0),
                             'Competitors': city_results.get('scoring_report', {}).get('total_competitors', 0),
@@ -924,14 +969,14 @@ def main():
                         })
                     
                     comparison_df = pd.DataFrame(comparison_rows)
-                    st.dataframe(comparison_df, hide_index=True, use_container_width=True)
+                    st.dataframe(comparison_df, hide_index=True, width='stretch')
 
                     # Multi-City Comparison Chart
                     numeric_df = comparison_df.copy()
                     # Convert Top Score and Radius to numeric for plotting
                     numeric_df['Top Score'] = numeric_df['Top Score'].astype(float)
                     numeric_df['Radius'] = numeric_df['Radius'].str.replace(' km','', regex=False).astype(float)
-                    melted = numeric_df.melt('City', var_name='Metric', value_name='Value')
+                    melted = numeric_df.melt(['City','Business'], var_name='Metric', value_name='Value')
                     # Exclude radius if not desired in main comparison (optional)
                     focus_metrics = melted[melted['Metric'].isin(['POIs','Clusters','Competitors','Top Score'])]
                     chart = (
@@ -941,11 +986,11 @@ def main():
                             x=alt.X('City:N', title='City'),
                             y=alt.Y('Value:Q', title='Value'),
                             color=alt.Color('Metric:N', title='Metric'),
-                            tooltip=['City','Metric','Value']
+                            tooltip=['City','Business','Metric','Value']
                         )
                         .properties(title='Multi-City Metric Comparison', height=360)
                     )
-                    st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, use_container_width=True)  # Altair API retains use_container_width for now
                     
                     st.markdown("### Best City Recommendation")
                     if comparison_rows:
@@ -995,7 +1040,7 @@ def main():
                 
                 st.markdown("### Generate PDF Report")
                 
-                if st.button("📄 Generate PDF Report", type="primary", use_container_width=True):
+                if st.button("📄 Generate PDF Report", type="primary", width='stretch'):
                     with st.spinner("Generating PDF report..."):
                         try:
                             report_path = generate_pdf_report(
@@ -1041,7 +1086,7 @@ def main():
                 scores_df = pd.read_csv('data/location_scores.csv')
                 st.dataframe(
                     scores_df.head(20),
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True
                 )
             
@@ -1187,7 +1232,7 @@ def main():
                                 
                                 if biz_data:
                                     biz_df = pd.DataFrame(biz_data)
-                                    st.dataframe(biz_df, use_container_width=True, hide_index=True)
+                                    st.dataframe(biz_df, width='stretch', hide_index=True)
                                 
                                 st.info(analyze_simulation_results(sim_results))
                         except Exception as e:

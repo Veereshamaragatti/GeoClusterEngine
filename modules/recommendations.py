@@ -91,7 +91,7 @@ DEFAULT_WEIGHTS = {
     'infrastructure': 0.1
 }
 
-TRANSPORT_KEYWORDS = ['bus', 'station', 'parking', 'fuel']
+TRANSPORT_KEYWORDS = ['train', 'bus', 'station', 'footway', 'footpath']
 INFRA_GROUPS = ['healthcare', 'education', 'finance']
 
 
@@ -238,7 +238,7 @@ def annotate_clusters_with_transport(top_clusters: pd.DataFrame,
         df['nearest_transport_distance_km'] = None
         return df
 
-    transport_keywords = transport_keywords or ['train', 'bus', 'station', 'parking', 'fuel', 'footway', 'footpath']
+    transport_keywords = transport_keywords or ['train', 'bus', 'station','footway', 'footpath']
 
     # Filter transport POIs
     if 'category' in cleaned_pois.columns:
@@ -312,7 +312,7 @@ def annotate_locations_with_transport(locations_df: pd.DataFrame,
         df['nearest_transport_distance_km'] = None
         return df
 
-    transport_keywords = transport_keywords or ['train','metro','subway','bus','station','tram','parking','fuel','footway','footpath']
+    transport_keywords = transport_keywords or ['train','bus','station','footway','footpath']
     if 'category' in cleaned_pois.columns:
         mask = pd.Series(False, index=cleaned_pois.index)
         for kw in transport_keywords:
